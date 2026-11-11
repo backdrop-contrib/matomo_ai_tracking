@@ -1,0 +1,6 @@
+{
+    "_config_name": "matomo_ai_tracking.settings",
+    "enabled": 0,
+    "patterns": "ChatGPT-User|Claude-User|Perplexity-User|MistralAI-User|Gemini-Deep-Research|GoogleAgent|NovaAct",
+    "token_auth": ""
+}

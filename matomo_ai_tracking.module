@@ -1,0 +1,228 @@
+<?php
+/**
+ * @file
+ * Backdrop Module: Matomo AI Bot Tracking
+ *
+ * Adds server-side tracking of AI assistants and chatbots (ChatGPT, Claude,
+ * Perplexity, etc.) to Matomo Analytics, using Matomo's HTTP Tracking API
+ * Bot Tracking parameters (Matomo 5.7.0+). This complements the Matomo
+ * module's client-side (JavaScript) tracking, which never fires for AI
+ * bots because they fetch pages without executing JavaScript.
+ *
+ * @see https://developer.matomo.org/api-reference/tracking-api#tracking-bots
+ * @see https://matomo.org/faq/how-to/set-up-ai-chatbot-tracking-with-the-http-tracking-api/
+ */
+
+/**
+ * Define the default list of User-Agent substrings/regex fragments used to
+ * identify AI assistants for server-side "bot tracking".
+ *
+ * This matches the minimum list of User-Agents Matomo itself currently
+ * recognises as live, user-triggered AI chatbot requests. Matomo determines
+ * chatbot classification independently on its own side, so adding training/
+ * indexing crawlers here (GPTBot, ClaudeBot, PerplexityBot, CCBot, etc.)
+ * will not make them appear in the AI Chatbots reports, though the requests
+ * will still be forwarded.
+ *
+ * @see https://matomo.org/faq/how-to/install-ai-chatbot-tracking/#supported-ai-chatbots-and-detection-rules
+ */
+define('MATOMO_AI_TRACKING_PATTERNS', 'ChatGPT-User|Claude-User|Perplexity-User|MistralAI-User|Gemini-Deep-Research|GoogleAgent|NovaAct');
+
+/**
+ * Implements hook_menu().
+ */
+function matomo_ai_tracking_menu() {
+  $items['admin/config/system/matomo/ai-tracking'] = array(
+    'title' => 'AI bot tracking',
+    'description' => 'Configure server-side tracking of AI assistants and chatbots for Matomo.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('matomo_ai_tracking_admin_settings_form'),
+    // Deliberately reuses the parent Matomo module's permission rather than
+    // defining a new one, since this module cannot function without it.
+    'access arguments' => array('administer matomo'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'matomo_ai_tracking.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_config_info().
+ */
+function matomo_ai_tracking_config_info() {
+  $info['matomo_ai_tracking.settings'] = array(
+    'label' => t('Matomo AI Bot Tracking'),
+    'group' => t('Configuration'),
+  );
+  return $info;
+}
+
+/**
+ * Implements hook_boot().
+ *
+ * AI assistants and crawlers (ChatGPT, Perplexity, Claude, etc.) fetch pages
+ * over plain HTTP and never execute JavaScript, so the Matomo module's
+ * client-side tracking code never fires for them. When enabled, this sends
+ * a server-to-server "bot tracking" beacon to Matomo instead, using the
+ * dedicated Bot Tracking parameters introduced in Matomo 5.7.0.
+ *
+ * hook_boot() is used instead of hook_init() or hook_exit() because it is
+ * the earliest hook available, and the only one Backdrop documents an
+ * option to invoke on cached page requests. AI bot requests rarely carry a
+ * Backdrop session cookie, so they are exactly the kind of request
+ * Backdrop's internal page cache serves directly, skipping hook_init()/
+ * hook_exit() entirely.
+ *
+ * IMPORTANT: per Backdrop's own hook_boot() documentation, this hook is NOT
+ * invoked by default for pages served from the internal page cache. You
+ * must add the following to the site's settings.php for bot tracking to
+ * also cover cached pages (this cannot be set from within a module):
+ * @code
+ *   $settings['page_cache_invoke_hooks'] = TRUE;
+ * @endcode
+ * Without this setting, bot tracking will only ever fire on the first
+ * request after each cache clear/expiry for a given URL.
+ *
+ * @see https://developer.matomo.org/api-reference/tracking-api#tracking-bots
+ */
+function matomo_ai_tracking_boot() {
+  $config = config('matomo_ai_tracking.settings');
+
+  if (!$config->get('enabled')) {
+    return;
+  }
+
+  // The Matomo site ID and server URLs are shared with, and configured on,
+  // the parent Matomo module - they are not duplicated here.
+  $matomo_config = config('matomo.settings');
+
+  $id = $matomo_config->get('site_id');
+  if (!preg_match('/^\d{1,}$/', $id)) {
+    return;
+  }
+
+  $ua = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+  if (empty($ua)) {
+    return;
+  }
+
+  // The error suppression only guards against an invalid pattern stored
+  // without going through the settings form (e.g. a config import): the form
+  // validates the regular expression with the same helper before saving.
+  if (!@preg_match(matomo_ai_tracking_patterns_regex($config->get('patterns')), $ua)) {
+    return;
+  }
+
+  _matomo_ai_tracking_send($matomo_config, $config, $id, $ua);
+}
+
+/**
+ * Builds the regular expression used to match AI User-Agents.
+ *
+ * @param string|null $patterns
+ *   User-Agent substrings/regular expression fragments separated by "|", as
+ *   stored in the configuration. Whitespace (including line breaks) around
+ *   each alternative is ignored. Falls back to the built-in default list
+ *   (MATOMO_AI_TRACKING_PATTERNS) when empty.
+ *
+ * @return string
+ *   A complete, case-insensitive PCRE regular expression.
+ */
+function matomo_ai_tracking_patterns_regex($patterns) {
+  $patterns = trim((string) $patterns);
+  if ($patterns === '') {
+    $patterns = MATOMO_AI_TRACKING_PATTERNS;
+  }
+  // Allow one alternative per line, and spaces around the separators.
+  $patterns = preg_replace('/\s*\|\s*/', '|', $patterns);
+  $patterns = preg_replace('/\s*[\r\n]+\s*/', '|', $patterns);
+  // Escape the delimiter so that a literal "#" cannot break the expression.
+  return '#(' . str_replace('#', '\#', $patterns) . ')#i';
+}
+
+/**
+ * Sends a fire-and-forget server-side bot tracking request to Matomo.
+ *
+ * A raw socket is used instead of backdrop_http_request() so that the page
+ * response being served to the bot (or to the visitor, for a normal
+ * request) is never delayed waiting for Matomo to answer: the request is
+ * written to the socket and the connection is closed immediately without
+ * reading the response.
+ *
+ * @param Config $matomo_config
+ *   The matomo.settings config object (parent module).
+ * @param Config $config
+ *   The matomo_ai_tracking.settings config object.
+ * @param string $id
+ *   The Matomo site ID.
+ * @param string $ua
+ *   The User-Agent string of the current request.
+ */
+function _matomo_ai_tracking_send($matomo_config, $config, $id, $ua) {
+  // Both globals are set by backdrop_settings_initialize() during the
+  // configuration bootstrap phase, so they are available in hook_boot(), also
+  // on page cache hits. Using them keeps the reported URL consistent with
+  // Backdrop's own, including settings.php overrides such as $base_url or
+  // $_SERVER['HTTPS'] behind a reverse proxy.
+  global $is_https, $base_root;
+
+  $base = ($is_https && $matomo_config->get('url_https')) ? $matomo_config->get('url_https') : $matomo_config->get('url_http');
+  if (empty($base)) {
+    return;
+  }
+
+  $current_url = $base_root . request_uri();
+
+  $query = array(
+    'idsite' => $id,
+    'rec' => 1,
+    'recMode' => 2,
+    'apiv' => 1,
+    'ua' => $ua,
+    'url' => $current_url,
+    'send_image' => 0,
+    'rand' => mt_rand(),
+  );
+
+  // Only send the visitor IP if a token_auth has been configured: 'cip'
+  // requires authentication.
+  $token_auth = $config->get('token_auth');
+  // ip_address() honours the reverse_proxy settings, so behind a proxy or CDN
+  // the bot's address is sent instead of the proxy's.
+  if (!empty($token_auth) && ($ip = ip_address())) {
+    $query['cip'] = $ip;
+    $query['token_auth'] = $token_auth;
+  }
+
+  $parts = parse_url(rtrim($base, '/') . '/matomo.php');
+  if (empty($parts['host'])) {
+    return;
+  }
+
+  $use_ssl = (isset($parts['scheme']) && $parts['scheme'] == 'https');
+  $port = !empty($parts['port']) ? $parts['port'] : ($use_ssl ? 443 : 80);
+  $path = (!empty($parts['path']) ? $parts['path'] : '/') . '?' . http_build_query($query, '', '&');
+
+  $fp = @fsockopen(($use_ssl ? 'ssl://' : '') . $parts['host'], $port, $errno, $errstr, 1);
+  if (!$fp) {
+    // watchdog() lives in common.inc, which is not guaranteed to be loaded
+    // when this runs as a lightweight bootstrap hook on a cached page hit,
+    // so guard the call defensively instead of assuming it exists.
+    if (function_exists('watchdog')) {
+      watchdog('matomo_ai_tracking', 'Bot tracking request to @host failed: @error', array(
+        '@host' => $parts['host'],
+        '@error' => $errstr,
+      ), WATCHDOG_WARNING);
+    }
+    return;
+  }
+
+  stream_set_timeout($fp, 1);
+  $request = "GET $path HTTP/1.1\r\n";
+  $request .= "Host: {$parts['host']}\r\n";
+  $request .= "User-Agent: Backdrop Matomo AI bot-tracking\r\n";
+  $request .= "Connection: Close\r\n\r\n";
+  fwrite($fp, $request);
+  fclose($fp);
+}

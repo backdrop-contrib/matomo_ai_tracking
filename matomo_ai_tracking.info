@@ -1,0 +1,7 @@
+name = "Matomo AI Bot Tracking"
+description = Server-side tracking of AI assistants and chatbots (ChatGPT, Claude, Perplexity, etc.) for Matomo Analytics, including pages served from Backdrop's internal page cache.
+backdrop = 1.x
+type = module
+package = Statistics
+configure = admin/config/system/matomo/ai-tracking
+dependencies[] = matomo
