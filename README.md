@@ -67,7 +67,7 @@ phase where `common.inc` and most module APIs are not yet loaded. Modules that
 implement those hooks assuming a full bootstrap will throw a fatal
 `Call to undefined function` error, visible only to anonymous users.
 
-Two known cases:
+Three known cases:
 
 - **devel** — `devel_exit()` fails. Devel should not be enabled on a production
   site anyway.
@@ -75,6 +75,9 @@ Two known cases:
   Fixed upstream in
   [issue #66](https://github.com/backdrop-contrib/gdpr_cookies/issues/66);
   update to 1.x-1.3.7 or later.
+- **statistics** — `statistics_exit()` fails in versions before 1.x-1.2.0,
+  which also adds the missing `accesslog.user_agent` column. Update to
+  1.x-1.2.0 or later and run `update.php`.
 
 If you enable this setting, check which modules are involved with:
 
