@@ -71,8 +71,10 @@ Two known cases:
 
 - **devel** — `devel_exit()` fails. Devel should not be enabled on a production
   site anyway.
-- **gdpr_cookies** — `gdpr_cookies_exit()` fails. An issue is being filed
-  upstream; the fix is a small guard at the top of the hook.
+- **gdpr_cookies** — `gdpr_cookies_exit()` fails in versions before 1.x-1.3.7.
+  Fixed upstream in
+  [issue #66](https://github.com/backdrop-contrib/gdpr_cookies/issues/66);
+  update to 1.x-1.3.7 or later.
 
 If you enable this setting, check which modules are involved with:
 
